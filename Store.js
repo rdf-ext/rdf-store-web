@@ -1,6 +1,7 @@
 const rdf = require('rdf-ext')
 const rdfFetch = require('rdf-fetch')
-const SourceTripleToQuad = require('rdf-source-triple-to-quad')
+const FilterStream = require('rdf-stream-filter')
+const TripleToQuadTransform = require('rdf-transform-triple-to-quad')
 
 class Store {
   constructor (options) {
@@ -11,11 +12,11 @@ class Store {
   }
 
   match (subject, predicate, object, graph) {
-    let stream = new SourceTripleToQuad(graph, {factory: this.factory})
+    let stream = new TripleToQuadTransform(graph, {factory: this.factory})
 
     this.fetch(graph.value).then((res) => {
       return Store.handleResponse(res, stream).then((quadStream) => {
-        return quadStream.match(subject, predicate, object).pipe(stream)
+        return new FilterStream(quadStream, subject, predicate, object).pipe(stream)
       })
     }).catch((err) => {
       stream.emit('error', err)
