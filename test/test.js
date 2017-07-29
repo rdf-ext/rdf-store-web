@@ -144,22 +144,22 @@ describe('rdf-store-web', () => {
 
       nock('http://example.org')
         .post(urlPath)
-        .reply(200, function (url, body) {
-          let mediaType = this.req.headers['content-type'][0]
+        .reply(200, function (url, body, callback) {
+          const mediaType = this.req.headers['content-type'][0]
 
           rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
             sentDataset = dataset
-          })
 
-          return [simpleGraphNT, {'Content-Type': 'text/turtle'}]
+            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
+          })
         })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      let dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
+      const dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
 
       return rdf.waitFor(store.import(dataset.toStream())).then(() => {
-        assert(simpleGraph.equals(sentDataset))
+        assert(rdf.graph(dataset).equals(sentDataset))
       })
     })
 
@@ -170,22 +170,22 @@ describe('rdf-store-web', () => {
 
       nock('http://example.org')
         .put(urlPath)
-        .reply(200, function (url, body) {
+        .reply(200, function (url, body, callback) {
           let mediaType = this.req.headers['content-type'][0]
 
           rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
             sentDataset = dataset
-          })
 
-          return [simpleGraphNT, {'Content-Type': 'text/turtle'}]
+            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
+          })
         })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      let dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
+      const dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
 
       return rdf.waitFor(store.import(dataset.toStream(), {truncate: true})).then(() => {
-        assert(simpleGraph.equals(sentDataset))
+        assert(rdf.graph(dataset).equals(sentDataset))
       })
     })
 
@@ -264,17 +264,17 @@ describe('rdf-store-web', () => {
 
       nock('http://example.org')
         .put(urlPath)
-        .reply(200, function (url, body) {
+        .reply(200, function (url, body, callback) {
           let mediaType = this.req.headers['content-type'][0]
 
           rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
             sentDataset = dataset
-          })
 
-          return [simpleGraphNT, {'Content-Type': 'text/turtle'}]
+            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
+          })
         })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
       return rdf.waitFor(store.remove(removeDataset.toStream())).then(() => {
         assert(expectedDataset.equals(sentDataset))
@@ -400,17 +400,17 @@ describe('rdf-store-web', () => {
 
       nock('http://example.org')
         .put(urlPath)
-        .reply(200, function (url, body) {
+        .reply(200, function (url, body, callback) {
           let mediaType = this.req.headers['content-type'][0]
 
           rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
             sentDataset = dataset
-          })
 
-          return [simpleGraphNT, {'Content-Type': 'text/turtle'}]
+            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
+          })
         })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
       return rdf.waitFor(store.removeMatches(null, null, rdf.literal('object 1'), rdf.namedNode('http://example.org' + urlPath))).then(() => {
         assert(expectedDataset.equals(sentDataset))

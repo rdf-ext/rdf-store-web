@@ -30,9 +30,13 @@ class Store {
 
     const method = options.truncate ? 'put' : 'post'
 
+    const stream = new TripleToQuadTransform(graph, {factory: this.factory})
+
+    graph.toStream().pipe(stream)
+
     return this.fetch(iri.value || iri, {
       method: method,
-      body: graph.toStream()
+      body: stream
     }).then((res) => {
       return Store.handleResponse(res)
     }).then((quadStream) => {
