@@ -1,519 +1,446 @@
-/* global describe, it */
+import { rejects, strictEqual } from 'node:assert'
+import { describe, it } from 'mocha'
+import nock from 'nock'
+import rdf from 'rdf-ext'
+import { datasetEqual } from 'rdf-test/assert.js'
+import eventToPromise from 'rdf-utils-stream/eventToPromise.js'
+import chunks from 'stream-chunks/chunks.js'
+import WebStore from '../index.js'
+import * as ns from './support/namespaces.js'
 
-const assert = require('assert')
-const formats = require('rdf-formats-common')()
-const nock = require('nock')
-const rdf = require('rdf-ext')
-const rdfFetch = require('rdf-fetch')
-const stringToStream = require('string-to-stream')
-const WebStore = require('..')
+function prepareUrl (path) {
+  const origin = 'http://example.org'
+  const graph = rdf.namedNode(`${origin}${path}`)
 
-function expectError (p) {
-  return new Promise((resolve, reject) => {
-    Promise.resolve().then(() => {
-      return p()
-    }).then(() => {
-      reject(new Error('no error thrown'))
-    }).catch(() => {
-      resolve()
-    })
-  })
+  return {
+    graph,
+    origin,
+    path
+  }
 }
 
 describe('rdf-store-web', () => {
-  const simpleDataset = rdf.dataset([
-    rdf.quad(
-      rdf.namedNode('http://example.org/subject'),
-      rdf.namedNode('http://example.org/predicate'),
-      rdf.literal('object'),
-      rdf.namedNode('http://example.org/graph')
-    )
-  ])
-
-  const simpleGraph = rdf.graph(simpleDataset)
-
-  const simpleGraphNT = '<http://example.org/subject> <http://example.org/predicate> "object".'
+  const simpleDataset = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object, ns.ex.graph)])
+  const simpleGraph = rdf.dataset(simpleDataset, rdf.defaultGraph())
+  const simpleGraphNT = simpleGraph.toCanonical()
 
   describe('.match', () => {
-    it('should use http GET method', () => {
-      const urlPath = '/get-method'
+    it('should use http GET method', async () => {
+      const { graph, origin, path } = prepareUrl('/get-method')
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, simpleGraphNT, {'Content-Type': 'text/turtle'})
+      const scope = nock(origin)
+        .get(path)
+        .reply(200, simpleGraphNT, { 'Content-Type': 'text/turtle' })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath)))
+      const stream = store.match(null, null, null, graph)
+      await chunks(stream)
+
+      strictEqual(scope.isDone(), true)
     })
 
-    it('should build accept header', () => {
-      const urlPath = '/accept-header'
+    it('should build accept header', async () => {
+      const { graph, origin, path } = prepareUrl('/accept-header')
 
-      nock('http://example.org', {
+      const scope = nock(origin, {
         reqheaders: {
-          accept: rdfFetch.defaults.formats.parsers.list().join(', ')
+          accept: [...rdf.formats.parsers.keys()].join(', ')
         }
       })
-        .get(urlPath)
-        .reply(200, simpleGraphNT, {'Content-Type': 'text/turtle'})
+        .get(path)
+        .reply(200, simpleGraphNT, { 'Content-Type': 'text/turtle' })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath)))
+      await chunks(store.match(null, null, null, graph))
+
+      strictEqual(scope.isDone(), true)
     })
 
-    it('should return all matching quads', () => {
-      const urlPath = '/quads'
+    it('should return all matching quads', async () => {
+      const { graph, origin, path } = prepareUrl('/quads')
+      const expected = rdf.dataset(simpleGraph, graph)
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, simpleGraphNT, {'Content-Type': 'text/turtle'})
+      nock(origin)
+        .get(path)
+        .reply(200, simpleGraphNT, { 'Content-Type': 'text/turtle' })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath))).then((dataset) => {
-        assert(rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath)).equals(dataset))
-      })
+      const stream = store.match(null, null, null, graph)
+      const result = await rdf.dataset().import(stream)
+
+      datasetEqual(expected, result)
     })
 
-    it('should handle request error', () => {
-      const urlPath = '/client-error'
+    it('should handle request error', async () => {
+      const { graph } = prepareUrl('/client-error')
 
-      const options = {
-        fetch: () => {
-          return Promise.reject(new Error('error'))
+      const store = new WebStore({
+        fetch: async () => {
+          throw new Error('error')
         }
-      }
+      })
 
-      let store = new WebStore(options)
-
-      return expectError(() => {
-        return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await chunks(store.match(null, null, null, graph))
       })
     })
 
-    it('should handle error status code', () => {
-      const urlPath = '/status-error'
+    it('should handle error status code', async () => {
+      const { graph, origin, path } = prepareUrl('/status-error')
 
-      nock('http://example.org')
-        .get(urlPath)
+      nock(origin)
+        .get(path)
         .reply(500)
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return expectError(() => {
-        return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await chunks(store.match(null, null, null, graph))
       })
     })
 
-    it('should handle parser errors', () => {
-      const urlPath = '/parser-error'
+    it('should handle parser errors', async () => {
+      const { graph, origin, path } = prepareUrl('/parser-error')
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, '1' + simpleGraphNT, {'Content-Type': 'text/turtle'})
+      nock(origin)
+        .get(path)
+        .reply(200, '1' + simpleGraphNT, { 'content-type': 'text/turtle' })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return expectError(() => {
-        return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await chunks(store.match(null, null, null, graph))
       })
     })
 
-    it('should use the graph IRI as base IRI', () => {
-      const urlPath = '/base-iri'
+    it('should use the graph IRI as base IRI', async () => {
+      const { graph, origin, path } = prepareUrl('/base-iri')
+      const expected = rdf.dataset(simpleGraph, graph)
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, '<subject> <predicate> "object".', {'Content-Type': 'text/turtle'})
+      nock(origin)
+        .get(path)
+        .reply(200, '<subject> <predicate> <object>.', { 'content-type': 'text/turtle' })
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return rdf.dataset().import(store.match(null, null, null, rdf.namedNode('http://example.org' + urlPath))).then((dataset) => {
-        assert(rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath)).equals(dataset))
-      })
+      const stream = store.match(null, null, null, graph)
+      const result = await rdf.dataset().import(stream)
+
+      datasetEqual(expected, result)
     })
   })
 
   describe('.import', () => {
-    it('should use http POST method', () => {
-      const urlPath = '/post-method'
+    it('should use http POST method', async () => {
+      const { graph, origin, path } = prepareUrl('/post-method')
 
-      let sentDataset
+      const scope = nock(origin)
+        .post(path)
+        .reply(200)
 
-      nock('http://example.org')
-        .post(urlPath)
-        .reply(200, function (url, body, callback) {
-          const mediaType = this.req.headers['content-type'][0]
+      const store = new WebStore()
 
-          rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
-            sentDataset = dataset
+      const dataset = rdf.dataset(simpleGraph, graph)
+      await eventToPromise(store.import(dataset.toStream()))
 
-            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
-          })
+      strictEqual(scope.isDone(), true)
+    })
+
+    it('should send the given dataset', async () => {
+      const { graph, origin, path } = prepareUrl('/send-dataset')
+      const expected = rdf.dataset(simpleGraph, graph)
+
+      let result
+
+      nock(origin)
+        .post(path)
+        .reply(async function (url, body, callback) {
+          const mediaType = this.req.headers['content-type']
+          result = await rdf.io.dataset.fromText(mediaType, body)
+
+          callback(null, [201])
         })
 
       const store = new WebStore()
 
-      const dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
+      await eventToPromise(store.import(expected.toStream()))
 
-      return rdf.waitFor(store.import(dataset.toStream())).then(() => {
-        assert(rdf.graph(dataset).equals(sentDataset))
-      })
+      datasetEqual(result, expected)
     })
 
-    it('should use http PUT method to truncate graph', () => {
-      const urlPath = '/put-method'
+    it('should use http PUT method to truncate graph', async () => {
+      const { graph, origin, path } = prepareUrl('/put-method')
 
-      let sentDataset
-
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(200, function (url, body, callback) {
-          let mediaType = this.req.headers['content-type'][0]
-
-          rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
-            sentDataset = dataset
-
-            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
-          })
-        })
+      const scope = nock(origin)
+        .put(path)
+        .reply(200)
 
       const store = new WebStore()
 
-      const dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
+      const dataset = rdf.dataset(simpleGraph, graph)
+      await eventToPromise(store.import(dataset.toStream(), { truncate: true }))
 
-      return rdf.waitFor(store.import(dataset.toStream(), {truncate: true})).then(() => {
-        assert(rdf.graph(dataset).equals(sentDataset))
-      })
+      strictEqual(scope.isDone(), true)
     })
 
-    it('should do nothing if the graph is empty', () => {
-      let store = new WebStore()
+    it('should do nothing if the graph is empty', async () => {
+      const store = new WebStore()
 
-      let dataset = rdf.dataset()
+      const dataset = rdf.dataset()
 
-      return rdf.waitFor(store.import(dataset.toStream()))
+      await eventToPromise(store.import(dataset.toStream()))
     })
 
-    it('should handle request error', () => {
-      const urlPath = '/import-client-error'
+    it('should handle request error', async () => {
+      const { graph } = prepareUrl('/import-client-error')
 
-      const options = {
-        fetch: () => {
-          return Promise.reject(new Error('error'))
+      const store = new WebStore({
+        fetch: async () => {
+          throw new Error('error')
         }
-      }
+      })
 
-      let store = new WebStore(options)
+      const dataset = rdf.dataset(simpleGraph, graph)
 
-      let dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
-
-      return expectError(() => {
-        return rdf.waitFor(store.import(dataset.toStream()))
+      await rejects(async () => {
+        await chunks(store.import(dataset.toStream()))
       })
     })
 
-    it('should handle error status code', () => {
-      const urlPath = '/import-status-error'
+    it('should handle error status code', async () => {
+      const { graph, origin, path } = prepareUrl('/import-status-error')
 
-      nock('http://example.org')
-        .post(urlPath)
+      nock(origin)
+        .post(path)
         .reply(500)
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      let dataset = rdf.dataset(simpleGraph, rdf.namedNode('http://example.org' + urlPath))
+      const dataset = rdf.dataset(simpleGraph, graph)
 
-      return expectError(() => {
-        return rdf.waitFor(store.import(dataset.toStream()))
+      await rejects(async () => {
+        await chunks(store.import(dataset.toStream()))
       })
     })
   })
 
   describe('.remove', () => {
-    it('should fetch and replace', () => {
-      const urlPath = '/remove-fetch-replace'
-
-      const originalDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 1')
-        ),
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 2')
-        )
+    it('should fetch and replace', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-fetch-replace')
+      const input = rdf.dataset([
+        rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object1),
+        rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object2)
       ])
+      const expected = rdf.dataset(input.match(null, null, ns.ex.object2), graph)
+      const remove = rdf.dataset(input.match(null, null, ns.ex.object1), graph)
 
-      const removeDataset = rdf.dataset(
-        originalDataset.match(null, null, rdf.literal('object 1')),
-        rdf.namedNode('http://example.org' + urlPath)
-      )
+      let result
 
-      const expectedDataset = originalDataset.match(null, null, rdf.literal('object 2'))
+      nock(origin)
+        .get(path)
+        .reply(200, input.toCanonical(), { 'content-type': 'text/turtle' })
 
-      let sentDataset
+      nock(origin)
+        .put(path)
+        .reply(async function (url, body, callback) {
+          const mediaType = this.req.headers['content-type']
+          result = await rdf.io.dataset.fromText(mediaType, body)
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, originalDataset.toString(), {'content-type': 'text/turtle'})
-
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(200, function (url, body, callback) {
-          let mediaType = this.req.headers['content-type'][0]
-
-          rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
-            sentDataset = dataset
-
-            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
-          })
+          callback(null, [201])
         })
 
       const store = new WebStore()
 
-      return rdf.waitFor(store.remove(removeDataset.toStream())).then(() => {
-        assert(expectedDataset.equals(sentDataset))
+      await eventToPromise(store.remove(remove.toStream()))
+
+      datasetEqual(expected, result)
+    })
+
+    it('should do nothing if stream contains no quads', async () => {
+      const remove = rdf.dataset()
+
+      const store = new WebStore()
+
+      await eventToPromise(store.remove(remove.toStream()))
+    })
+
+    it('should not send replace if no quads have been removed', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-no-changes')
+      const input = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object1)])
+      const remove = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object2)], graph)
+
+      nock(origin)
+        .get(path)
+        .reply(200, input.toString(), { 'content-type': 'text/turtle' })
+
+      const store = new WebStore()
+
+      await eventToPromise(store.remove(remove.toStream()))
+    })
+
+    it('should handle fetch errors', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-fetch-error')
+      const remove = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object)], graph)
+
+      nock(origin)
+        .get(path)
+        .reply(500)
+
+      nock(origin)
+        .put(path)
+        .reply(200, simpleGraphNT, { 'Content-Type': 'text/turtle' })
+
+      const store = new WebStore()
+
+      await rejects(async () => {
+        await eventToPromise(store.remove(remove.toStream()))
       })
     })
 
-    it('should do nothing if stream contains no quads', () => {
-      const removeDataset = rdf.dataset()
+    it('should handle replace errors', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-replace-error')
+      const remove = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object)], graph)
 
-      let store = new WebStore()
+      nock(origin)
+        .get(path)
+        .reply(200, simpleGraphNT, { 'content-type': 'text/turtle' })
 
-      return rdf.waitFor(store.remove(removeDataset.toStream()))
-    })
-
-    it('should not send replace if no quads have been removed', () => {
-      const urlPath = '/remove-no-changes'
-
-      const originalDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 1')
-        )
-      ])
-
-      const removeDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 2'),
-          rdf.namedNode('http://example.org' + urlPath)
-        )
-      ])
-
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, originalDataset.toString(), {'content-type': 'text/turtle'})
-
-      let store = new WebStore()
-
-      return rdf.waitFor(store.remove(removeDataset.toStream()))
-    })
-
-    it('should handle fetch errors', () => {
-      const urlPath = '/remove-fetch-error'
-
-      const removeDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 1'),
-          rdf.namedNode('http://example.org' + urlPath)
-        )
-      ])
-
-      nock('http://example.org')
-        .get(urlPath)
+      nock(origin)
+        .put(path)
         .reply(500)
 
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(200, simpleGraphNT, {'Content-Type': 'text/turtle'})
+      const store = new WebStore()
 
-      let store = new WebStore()
-
-      return expectError(() => {
-        return rdf.waitFor(store.remove(removeDataset.toStream()))
-      })
-    })
-
-    it('should handle replace errors', () => {
-      const urlPath = '/remove-replace-error'
-
-      const removeDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object'),
-          rdf.namedNode('http://example.org' + urlPath)
-        )
-      ])
-
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, simpleGraphNT, {'content-type': 'text/turtle'})
-
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(500)
-
-      let store = new WebStore()
-
-      return expectError(() => {
-        return rdf.waitFor(store.remove(removeDataset.toStream()))
+      await rejects(async () => {
+        await chunks(store.remove(remove.toStream()))
       })
     })
   })
 
   describe('.removeMatches', () => {
-    it('should fetch and replace', () => {
-      const urlPath = '/remove-matches-fetch-replace'
-
-      const originalDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 1')
-        ),
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 2')
-        )
+    it('should fetch and replace', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-matches-fetch-replace')
+      const input = rdf.dataset([
+        rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object1),
+        rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object2)
       ])
+      const expected = rdf.dataset(input.match(null, null, ns.ex.object2), graph)
 
-      const expectedDataset = originalDataset.match(null, null, rdf.literal('object 2'))
+      let result
 
-      let sentDataset
+      nock(origin)
+        .get(path)
+        .reply(200, input.toCanonical(), { 'content-type': 'text/turtle' })
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, originalDataset.toString(), {'content-type': 'text/turtle'})
+      nock(origin)
+        .put(path)
+        .reply(async function (url, body, callback) {
+          const mediaType = this.req.headers['content-type']
+          result = await rdf.io.dataset.fromText(mediaType, body)
 
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(200, function (url, body, callback) {
-          let mediaType = this.req.headers['content-type'][0]
-
-          rdf.dataset().import(formats.parsers.import(mediaType, stringToStream(body))).then((dataset) => {
-            sentDataset = dataset
-
-            callback(null, [simpleGraphNT, {'Content-Type': 'text/turtle'}])
-          })
+          callback(null, [201])
         })
 
       const store = new WebStore()
 
-      return rdf.waitFor(store.removeMatches(null, null, rdf.literal('object 1'), rdf.namedNode('http://example.org' + urlPath))).then(() => {
-        assert(expectedDataset.equals(sentDataset))
+      await eventToPromise(store.removeMatches(null, null, ns.ex.object1, graph))
+
+      datasetEqual(expected, result)
+    })
+
+    it('should not send replace if no quads have been removed', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-matches-no-changes')
+      const input = rdf.dataset([rdf.quad(ns.ex.subject, ns.ex.predicate, ns.ex.object1)])
+
+      nock(origin)
+        .get(path)
+        .reply(200, input.toCanonical(), { 'content-type': 'text/turtle' })
+
+      const store = new WebStore()
+
+      await eventToPromise(store.removeMatches(null, null, ns.ex.object2, graph))
+    })
+
+    it('should handle fetch errors', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-matches-fetch-error')
+
+      nock(origin)
+        .get(path)
+        .reply(500)
+
+      nock(origin)
+        .put(path)
+        .reply(200, simpleGraphNT, { 'Content-Type': 'text/turtle' })
+
+      const store = new WebStore()
+
+      await rejects(async () => {
+        await chunks(store.removeMatches(null, null, ns.ex.object, graph))
       })
     })
 
-    it('should not send replace if no quads have been removed', () => {
-      const urlPath = '/remove-matches-no-changes'
+    it('should handle replace errors', async () => {
+      const { graph, origin, path } = prepareUrl('/remove-matches-replace-error')
 
-      const originalDataset = rdf.dataset([
-        rdf.quad(
-          rdf.namedNode('http://example.org/subject'),
-          rdf.namedNode('http://example.org/predicate'),
-          rdf.literal('object 1')
-        )
-      ])
+      nock(origin)
+        .get(path)
+        .reply(200, simpleGraphNT, { 'content-type': 'text/turtle' })
 
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, originalDataset.toString(), {'content-type': 'text/turtle'})
-
-      let store = new WebStore()
-
-      return rdf.waitFor(store.removeMatches(null, null, rdf.literal('object 2'), rdf.namedNode('http://example.org' + urlPath)))
-    })
-
-    it('should handle fetch errors', () => {
-      const urlPath = '/remove-matches-fetch-error'
-
-      nock('http://example.org')
-        .get(urlPath)
+      nock(origin)
+        .put(path)
         .reply(500)
 
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(200, simpleGraphNT, {'Content-Type': 'text/turtle'})
+      const store = new WebStore()
 
-      let store = new WebStore()
-
-      return expectError(() => {
-        return rdf.waitFor(store.removeMatches(null, null, rdf.literal('object 1'), rdf.namedNode('http://example.org' + urlPath)))
-      })
-    })
-
-    it('should handle replace errors', () => {
-      const urlPath = '/remove-matches-replace-error'
-
-      nock('http://example.org')
-        .get(urlPath)
-        .reply(200, simpleGraphNT, {'content-type': 'text/turtle'})
-
-      nock('http://example.org')
-        .put(urlPath)
-        .reply(500)
-
-      let store = new WebStore()
-
-      return expectError(() => {
-        return rdf.waitFor(store.removeMatches(null, null, rdf.literal('object'), rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await chunks(store.removeMatches(null, null, ns.ex.object, graph))
       })
     })
   })
 
-  describe('.deleteGraph', function () {
-    it('should use http DELETE method', () => {
-      const urlPath = '/delete-method'
+  describe('.deleteGraph', () => {
+    it('should use http DELETE method', async () => {
+      const { graph, origin, path } = prepareUrl('/delete-method')
 
-      nock('http://example.org')
-        .delete(urlPath)
+      const scope = nock(origin)
+        .delete(path)
         .reply(201)
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return rdf.waitFor(store.deleteGraph(rdf.namedNode('http://example.org' + urlPath)))
+      await eventToPromise(store.deleteGraph(graph))
+
+      strictEqual(scope.isDone(), true)
     })
 
-    it('should handle request error', () => {
-      const urlPath = '/delete-graph-client-error'
+    it('should handle request error', async () => {
+      const { graph } = prepareUrl('/delete-graph-client-error')
 
-      const options = {
+      const store = new WebStore({
         fetch: () => {
-          return Promise.reject(new Error('error'))
+          throw new Error('error')
         }
-      }
+      })
 
-      let store = new WebStore(options)
-
-      return expectError(() => {
-        return rdf.waitFor(store.deleteGraph(rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await eventToPromise(store.deleteGraph(graph))
       })
     })
 
-    it('should handle error status code', () => {
-      const urlPath = '/delete-graph-status-error'
+    it('should handle error status code', async () => {
+      const { graph, origin, path } = prepareUrl('/delete-graph-status-error')
 
-      nock('http://example.org')
-        .delete(urlPath)
+      nock(origin)
+        .delete(path)
         .reply(500)
 
-      let store = new WebStore()
+      const store = new WebStore()
 
-      return expectError(() => {
-        return rdf.waitFor(store.deleteGraph(rdf.namedNode('http://example.org' + urlPath)))
+      await rejects(async () => {
+        await eventToPromise(store.deleteGraph(graph))
       })
     })
   })

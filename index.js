@@ -1,125 +1,117 @@
-const rdf = require('rdf-ext')
-const rdfFetch = require('rdf-fetch')
-const FilterStream = require('rdf-stream-filter')
-const TripleToQuadTransform = require('rdf-transform-triple-to-quad')
+import rdf from 'rdf-ext'
+import FilterStream from 'rdf-stream-filter'
+import TripleToQuadTransform from 'rdf-transform-triple-to-quad'
+import promiseToEvent from 'rdf-utils-stream/promiseToEvent.js'
+import chunks from 'stream-chunks/chunks.js'
+import handleResponse from './lib/handleResponse.js'
 
-class Store {
-  constructor (options) {
-    options = options || {}
+class WebStore {
+  constructor ({ factory = rdf } = {}) {
+    this.factory = factory
+  }
 
-    this.factory = options.factory || rdf
-    this.fetch = options.fetch || rdfFetch
+  async _deleteGraph (graph) {
+    const res = await this.factory.fetch(graph.value, { method: 'DELETE' })
+
+    await handleResponse(res)
+  }
+
+  async _importGraph (graph, dataset, { truncate } = {}) {
+    const stream = new TripleToQuadTransform(graph, { factory: this.factory })
+    dataset.toStream().pipe(stream)
+
+    const res = await this.factory.fetch(graph.value, {
+      method: truncate ? 'PUT' : 'POST',
+      body: stream
+    })
+
+    const quadStream = await handleResponse(res)
+
+    if (quadStream) {
+      await chunks(quadStream)
+    }
+  }
+
+  async _import (stream, options) {
+    const dataset = await rdf.dataset().import(stream)
+
+    if (dataset.size === 0) {
+      return
+    }
+
+    const graph = [...dataset][0]?.graph
+
+    await this._importGraph(graph, dataset, options)
+  }
+
+  async _remove (stream) {
+    const remove = await rdf.dataset().import(stream)
+
+    // do nothing if there are no quads
+    if (remove.size === 0) {
+      return
+    }
+
+    const graph = [...remove][0]?.graph
+
+    const existing = await rdf.dataset().import(this.match(null, null, null, graph))
+    const updated = existing.difference(remove)
+
+    // don't update if there are no changes
+    if (updated.size === existing.size) {
+      return
+    }
+
+    return this._importGraph(graph, updated, { truncate: true })
+  }
+
+  async _removeMatches (subject, predicate, object, graph) {
+    const existing = await rdf.dataset().import(this.match(null, null, null, graph))
+    const remove = existing.match(subject, predicate, object)
+
+    // don't update if there are no changes
+    if (remove.size === 0) {
+      return
+    }
+
+    const updated = existing.difference(remove)
+
+    await this._importGraph(graph, updated, { truncate: true })
   }
 
   match (subject, predicate, object, graph) {
-    let stream = new TripleToQuadTransform(graph, {factory: this.factory})
+    const stream = new TripleToQuadTransform(graph, { factory: this.factory })
 
-    this.fetch(graph.value).then((res) => {
-      return Store.handleResponse(res, stream).then((quadStream) => {
-        return new FilterStream(quadStream, subject, predicate, object).pipe(stream)
-      })
-    }).catch((err) => {
-      stream.emit('error', err)
+    Promise.resolve().then(async () => {
+      try {
+        const res = await this.factory.fetch(graph.value)
+        const quadStream = await handleResponse(res)
+        const filteredStream = new FilterStream(quadStream, subject, predicate, object)
+
+        filteredStream.pipe(stream)
+      } catch (err) {
+        stream.destroy(err)
+      }
     })
 
     return stream
   }
 
-  importGraph (iri, graph, options) {
-    options = options || {}
-
-    const method = options.truncate ? 'put' : 'post'
-
-    const stream = new TripleToQuadTransform(graph, {factory: this.factory})
-
-    graph.toStream().pipe(stream)
-
-    return this.fetch(iri.value || iri, {
-      method: method,
-      body: stream
-    }).then((res) => {
-      return Store.handleResponse(res)
-    }).then((quadStream) => {
-      if (quadStream) {
-        quadStream.resume()
-
-        return rdf.waitFor(quadStream)
-      }
-    })
-  }
-
   import (stream, options) {
-    options = options || {}
-
-    return rdf.asEvent(() => {
-      return rdf.dataset().import(stream).then((dataset) => {
-        if (dataset.length === 0) {
-          return
-        }
-
-        const iri = dataset.toArray().shift().graph.value
-
-        return this.importGraph(iri, dataset, options)
-      })
-    })
+    return promiseToEvent(this._import(stream, options))
   }
 
   remove (stream) {
-    return rdf.asEvent(() => {
-      return rdf.dataset().import(stream).then((remove) => {
-        // do nothing if there are no quads
-        if (remove.length === 0) {
-          return
-        }
-
-        const iri = remove.toArray().shift().graph
-
-        return rdf.dataset().import(this.match(null, null, null, iri)).then((existing) => {
-          const updated = existing.difference(remove)
-
-          // don't update if there are no changes
-          if (updated.length === existing.length) {
-            return
-          }
-
-          return this.importGraph(iri, updated, {truncate: true})
-        })
-      })
-    })
+    return promiseToEvent(this._remove(stream))
   }
 
   removeMatches (subject, predicate, object, graph) {
-    return rdf.asEvent(() => {
-      return rdf.dataset().import(this.match(null, null, null, graph)).then((existing) => {
-        const remove = existing.match(subject, predicate, object)
-
-        // don't update if there are no changes
-        if (remove.length === 0) {
-          return
-        }
-
-        const updated = existing.difference(remove)
-
-        return this.importGraph(graph, updated, {truncate: true})
-      })
-    })
+    return promiseToEvent(this._removeMatches(subject, predicate, object, graph))
   }
 
   deleteGraph (graph) {
-    return rdf.asEvent(() => {
-      return this.fetch(graph.value, {method: 'delete'}).then((res) => {
-        return Store.handleResponse(res)
-      })
-    })
-  }
-
-  static handleResponse (res) {
-    if (res.status > 299) {
-      return Promise.reject(new Error('http error'))
-    }
-
-    return res.quadStream()
+    return promiseToEvent(this._deleteGraph(graph))
   }
 }
 
-module.exports = Store
+export default WebStore
